@@ -8,14 +8,44 @@
  *  drag using Puppeteer.
  *  
  *  Works on Windows with visible Chrome window (headless: false).
- *  Token is captured from the GetBalance API request that happens
- *  after login + navigation to Win Go page.
+ *  Token is captured from the login API response or browser storage.
  * ============================================================
  */
 
 const puppeteer = require('puppeteer');
 const { PNG } = require('pngjs');
 const axios = require('axios');
+const fs = require('fs');
+
+const activeSessions = new Map();
+
+async function closeLoginSession(userId) {
+    const key = String(userId);
+    const session = activeSessions.get(key);
+    activeSessions.delete(key);
+    if (session?.browser) {
+        try { await session.browser.close(); } catch (error) {}
+    }
+}
+
+function findToken(value) {
+    if (typeof value === 'string') {
+        const token = value.trim().replace(/^Bearer\s+/i, '');
+        return token.length >= 20 && !/^(true|null|undefined)$/i.test(token) ? token : null;
+    }
+    if (!value || typeof value !== 'object') return null;
+    for (const [key, child] of Object.entries(value)) {
+        if (/token|authorization|auth/i.test(key)) {
+            const directToken = findToken(child);
+            if (directToken) return directToken;
+        }
+    }
+    for (const child of Object.values(value)) {
+        const nestedToken = findToken(child);
+        if (nestedToken) return nestedToken;
+    }
+    return null;
+}
 
 // ============================================================
 //  HELPER FUNCTIONS
@@ -34,6 +64,30 @@ function randomInt(min, max) {
 // ============================================================
 
 async function extractCaptchaImages(page) {
+    try {
+        await page.waitForFunction(() => {
+            const bgImg = document.querySelector('.captcha_background');
+            const sliderImg = document.querySelector('.captcha_slider');
+            if (!bgImg || !sliderImg) return false;
+
+            const visible = element => {
+                const rect = element.getBoundingClientRect();
+                const style = getComputedStyle(element);
+                return rect.width >= 20 && rect.height >= 20 &&
+                    style.display !== 'none' && style.visibility !== 'hidden' &&
+                    Number(style.opacity) > 0;
+            };
+
+            return visible(bgImg) && visible(sliderImg) &&
+                bgImg.complete && sliderImg.complete &&
+                bgImg.naturalWidth > 0 && sliderImg.naturalWidth > 0;
+        }, { timeout: 60000, polling: 250 });
+        console.log('[CAPTCHA] Background and puzzle piece are fully loaded');
+    } catch (error) {
+        console.error('[CAPTCHA] Timed out waiting 60 seconds for puzzle images');
+        return null;
+    }
+
     const imageData = await page.evaluate(() => {
         const bgImg = document.querySelector('.captcha_background');
         const sliderImg = document.querySelector('.captcha_slider');
@@ -504,6 +558,36 @@ async function solveCaptcha(page) {
 
 async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
     console.log(`[LOGIN] Starting captcha login for user ${userId}...`);
+
+    const existingSession = activeSessions.get(String(userId));
+    if (existingSession?.browser?.isConnected?.() && !existingSession.page?.isClosed?.()) {
+        try {
+            const storageValues = await existingSession.page.evaluate(() => {
+                const values = [];
+                for (let index = 0; index < localStorage.length; index++) values.push(localStorage.getItem(localStorage.key(index)));
+                for (let index = 0; index < sessionStorage.length; index++) values.push(sessionStorage.getItem(sessionStorage.key(index)));
+                return values;
+            });
+            for (const value of storageValues) {
+                let parsed = value;
+                try { parsed = JSON.parse(value); } catch (error) {}
+                const token = findToken(parsed);
+                if (token) {
+                    console.log('[LOGIN] ✅ Token recaptured from active login session!');
+                    return token;
+                }
+            }
+        } catch (error) {
+            activeSessions.delete(String(userId));
+        }
+    }
+    
+    // ============================================================
+    // CHANGE 1: headless: false → Chrome window visible-a irukkum
+    // CHANGE 2: executablePath → un laptop-la Chrome path
+    // CHANGE 3: Token capture same as un original code
+    // ============================================================
+    
     
     // ============================================================
     // CHANGE 1: headless: false → Chrome window visible-a irukkum
@@ -536,34 +620,49 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
             waitUntil: 'domcontentloaded', 
             timeout: 90000 
         });
+        page.on('response', async response => {
+            if (!/\/Login$|\/UserLogin/i.test(response.url())) return;
+            try {
+                const token = findToken(await response.json());
+                if (token && !capturedToken) {
+                    capturedToken = token.replace(/^Bearer\s+/i, '');
+                    console.log('[LOGIN] ✅ Token captured from API response!');
+                }
+            } catch (error) {
+                // Some responses are empty or non-JSON; request capture still handles those cases.
+            }
+        });
         
-        // Correct input selectors-ah wait panni type pannalam
-        await page.waitForSelector('input[type="text"], input[type="tel"], input[placeholder*="Phone"], input', { timeout: 30000 });
+        // Navigate to login page
+        await page.goto('https://goaokk.com/#/login', { 
+            waitUntil: 'domcontentloaded', 
+            timeout: 90000 
+        });
+        
+        await page.waitForSelector('input', { timeout: 30000 });
         await sleep(1000);
         
-        // Specific selector use panni phone matrum password-ah type seyyalam
-        // Phone number input field
-        const phoneInput = await page.$('input[placeholder*="number"], input[type="tel"], .van-field__control');
-        if (phoneInput) {
-            await phoneInput.click({ clickCount: 3 }); // Irruntha text-ah clear panna
-            await phoneInput.press('Backspace');
-            await phoneInput.type(phone, { delay: 50 });
-        } else {
-            // Fallback to index if specific not found
-            const inputs = await page.$$('input');
-            await inputs[1].type(phone, { delay: 50 });
+        const loginInputIndexes = await page.evaluate(() => {
+            const isVisible = element => {
+                const style = getComputedStyle(element);
+                const rect = element.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const inputs = [...document.querySelectorAll('input')];
+            const phoneIndex = inputs.findIndex(input => isVisible(input) &&
+                input.type !== 'password' && !/email|search/i.test(input.placeholder || '') &&
+                !String(input.placeholder || '').trim().startsWith('+'));
+            const passwordIndex = inputs.findIndex(input => isVisible(input) && input.type === 'password');
+            return { phoneIndex, passwordIndex };
+        });
+        const inputs = await page.$$('input');
+        if (loginInputIndexes.phoneIndex < 0 || loginInputIndexes.passwordIndex < 0) {
+            throw new Error('Visible phone/password inputs not found');
         }
 
-        await sleep(500);
-
-        // Password input field
-        const passwordInput = await page.$('input[type="password"]');
-        if (passwordInput) {
-            await passwordInput.type(password, { delay: 50 });
-        } else {
-            const inputs = await page.$$('input');
-            await inputs[2].type(password, { delay: 50 });
-        }
+        await inputs[loginInputIndexes.phoneIndex].type(phone, { delay: 50 });
+        await inputs[loginInputIndexes.passwordIndex].type(password, { delay: 50 });
+        
         // Click Login button
         await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
@@ -576,7 +675,7 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         await sleep(2000);
         
         let captchaDetected = false;
-        for (let i = 0; i < 20; i++) {
+        for (let i = 0; i < 120; i++) {
             captchaDetected = await isCaptchaVisible(page);
             if (captchaDetected) break;
             await sleep(500);
@@ -586,37 +685,50 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
             console.log('[LOGIN] Captcha detected! Solving...');
             
             try {
-                // Step 1: Calculate drag distance
-                const dragDistance = await solveCaptcha(page);
+                let solved = false;
+                for (let attempt = 1; attempt <= 3; attempt++) {
+                    console.log(`[LOGIN] Captcha solve attempt ${attempt}/3`);
+
+                    // Step 1: Calculate drag distance
+                    const dragDistance = await solveCaptcha(page);
                 
-                if (dragDistance < 10 || dragDistance > 330) {
-                    console.error(`[LOGIN] Invalid drag distance: ${dragDistance}`);
-                    if (chatId) await logBoth(chatId, '❌ Captcha solve failed - invalid distance');
+                    if (dragDistance >= 10 && dragDistance <= 330) {
+                        // Step 2: Perform human-like drag
+                        const dragged = await performHumanDrag(page, dragDistance);
+                        if (dragged) {
+                            await sleep(3000);
+                            if (!await isCaptchaVisible(page)) {
+                                solved = true;
+                                break;
+                            }
+                        }
+                    }
+                
+                    if (attempt < 3) {
+                        console.log('[LOGIN] Captcha attempt failed; refreshing before retry...');
+                        await refreshCaptcha(page);
+                    }
+                }
+
+                if (!solved) {
+                    if (chatId) await logBoth(chatId, '❌ Captcha solve failed after 3 attempts');
                     return false;
                 }
-                
-                // Step 2: Perform human-like drag
-                const dragged = await performHumanDrag(page, dragDistance);
-                
-                if (!dragged) {
-                    console.error('[LOGIN] Drag failed');
-                    if (chatId) await logBoth(chatId, '❌ Captcha solve failed - drag error');
-                    return false;
-                }
-                
-                // Step 3: Wait for verification
-                await sleep(3000);
-                
-                // Step 4: Check result
-                const captchaStillVisible = await isCaptchaVisible(page);
-                
-                if (captchaStillVisible) {
-                    console.log('[LOGIN] ❌ Captcha still visible - solve failed');
-                    if (chatId) await logBoth(chatId, '❌ Captcha solve failed - server rejected');
-                    return false;
-                }
-                
+
                 console.log('[LOGIN] ✅ Captcha solved successfully!');
+
+                if (capturedToken) {
+                    keepSession = true;
+                    console.log('[LOGIN] ✅ Login confirmed from API token.');
+                    if (chatId) await logBoth(chatId, `✅ [SUCCESS] Login confirmed for user ${userId}!`);
+                    return capturedToken;
+                }
+
+                await page.waitForFunction(() => {
+                    const text = document.body?.innerText || '';
+                    return /success|logged in|login successful/i.test(text) ||
+                        location.hash.includes('home') || location.hash.includes('main');
+                }, { timeout: 15000 }).catch(() => {});
                 
             } catch (err) {
                 console.error(`[LOGIN] Captcha solve failed: ${err.message}`);
@@ -628,10 +740,10 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         }
         
         // === POST-LOGIN NAVIGATION (same as your original code) ===
-        // This triggers the GetBalance API call which has the token
+        // Continue through the authenticated page to allow storage capture.
         
         try {
-            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 });
+            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
         } catch (e) {
             // Ignore timeout
         }
@@ -642,6 +754,24 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
             if (closeBtn) closeBtn.click();
         });
         await new Promise(r => setTimeout(r, 1000));
+
+        if (!capturedToken) {
+            const storageToken = await page.evaluate(() => {
+                const values = [];
+                for (let index = 0; index < localStorage.length; index++) values.push(localStorage.getItem(localStorage.key(index)));
+                for (let index = 0; index < sessionStorage.length; index++) values.push(sessionStorage.getItem(sessionStorage.key(index)));
+                return values.find(value => typeof value === 'string' && value.length >= 20 && /token|auth/i.test(value)) || null;
+            });
+            if (storageToken) {
+                try {
+                    const parsed = JSON.parse(storageToken);
+                    capturedToken = findToken(parsed) || storageToken.replace(/^Bearer\s+/i, '');
+                } catch (error) {
+                    capturedToken = storageToken.replace(/^Bearer\s+/i, '');
+                }
+                console.log('[LOGIN] ✅ Token captured from browser storage!');
+            }
+        }
 
         await page.evaluate(() => {
             const navItems = Array.from(document.querySelectorAll('div, span'));
@@ -664,6 +794,7 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         }
         
         if (capturedToken) {
+            keepSession = true;
             console.log('[LOGIN] ✅ Token captured successfully!');
             if (chatId) await logBoth(chatId, `✅ [SUCCESS] Token captured for user ${userId}!`);
             return capturedToken;
@@ -678,7 +809,10 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         if (chatId) await logBoth(chatId, `❌ Login Error for user ${userId}: ${err.message}`, true);
         return false;
     } finally {
-        if (browser) await browser.close();
+        if (browser && !keepSession) {
+            activeSessions.delete(String(userId));
+            await browser.close();
+        }
     }
 }
 
@@ -688,10 +822,10 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 
 module.exports = {
     captchaLogin,
+    closeLoginSession,
     solveCaptcha,
     solveGapPosition,
     performHumanDrag,
     isCaptchaVisible,
     extractCaptchaImages,
-    refreshCaptcha,
 };
