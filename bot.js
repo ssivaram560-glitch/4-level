@@ -274,56 +274,6 @@ function initUser(id) {
     };
 }
 
-async function promptGoaLoginPhone(userId, chatId) {
-    userAction[userId] = { action: "goaLogin", step: "phone" };
-    await send(chatId, "📱 Please enter your Goa mobile number:");
-}
-
-async function promptGoaLoginPassword(userId, chatId) {
-    if (!userAction[userId]) userAction[userId] = { action: "goaLogin", step: "password" };
-    else userAction[userId].step = "password";
-    await send(chatId, "🔑 Please enter your Goa password:");
-}
-
-async function promptGoaLoginConfirmation(userId, chatId) {
-    if (!userAction[userId]) userAction[userId] = { action: "goaLogin", step: "confirm" };
-    else userAction[userId].step = "confirm";
-    const msg = await send(chatId,
-"❓ Are you sure you want to login with this Goa mobile number and password?\n\n" +
-"If yes, we will attempt login automatically every 40 seconds.\n" +
-"If no, you can re-enter your mobile number and password.",
-        { reply_markup: { keyboard: [["✅ Yes","❌ No"]], resize_keyboard: true, one_time_keyboard: true } }
-    );
-    userAction[userId].confirmMsgId = msg.message_id;
-}
-
-async function runGoaLoginAttempts(userId, chatId) {
-    const s = userAction[userId];
-    if (!s || s.action !== "goaLogin") return false;
-
-    const MAX_ATTEMPTS = 7;
-    const DELAY_MS = 40000;
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        if (!userAction[userId] || userAction[userId].action !== "goaLogin" || userAction[userId].step !== "done") return false;
-        await send(chatId, `⏳ Login attempt ${attempt} of ${MAX_ATTEMPTS}...`);
-        const ok = await autoLogin(userId, chatId, true);
-        if (ok) {
-            await send(chatId, "✅ Login successful.");
-            delete userAction[userId];
-            return true;
-        }
-        if (attempt < MAX_ATTEMPTS) {
-            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-        }
-    }
-
-    await send(chatId, "❌ Login failed after multiple attempts. Please re-enter your Goa mobile number and password.");
-    delete userAction[userId];
-    await promptGoaLoginPhone(userId, chatId);
-    return false;
-}
-
 function hasAccess(id) {
     if (isOwner(id)) return true;
     const expiry = usersAccess[id];
@@ -1782,7 +1732,6 @@ function addHandlers(){
 "║ /key CODE to activate    ║\n╚══════════════════════════╝",
         {reply_markup:userMenu(id)});
         if (isNewUser) send(id, configSummary);
-        if (hasAccess(id)) promptGoaLoginPhone(id, msg.chat.id);
     });
 
     bot.onText(/\/key (.+)/,(msg,match)=>{
@@ -1912,44 +1861,8 @@ function addHandlers(){
             const s = userAction[id];
             if(text === "🔙 Back") { delete userAction[id]; }
             else if(s.action === "goaLogin"){
-                if(s.step === "phone"){
-                    const phone = text.trim();
-                    if(!phone || phone.length < 6) return send(id, "❌ Please enter a valid mobile number.");
-                    if(!userCreds[id]) userCreds[id] = {};
-                    userCreds[id].phone = phone;
-                    return promptGoaLoginPassword(id, msg.chat.id);
-                }
-                if(s.step === "password"){
-                    const pass = text.trim();
-                    if(!pass || pass.length < 3) return send(id, "❌ Please enter your Goa password.");
-                    if(!userCreds[id]) userCreds[id] = {};
-                    userCreds[id].pass = pass;
-                    return promptGoaLoginConfirmation(id, msg.chat.id);
-                }
-                if(s.step === "confirm"){
-                    const normalized = text.trim().toLowerCase();
-                    if(normalized === "✅ yes" || normalized === "yes" || normalized === "y"){
-                        if(s.confirmMsgId){
-                            bot.deleteMessage(msg.chat.id, s.confirmMsgId).catch(()=>{});
-                        }
-                        await send(msg.chat.id,
-"Dear user, please wait 3 minutes. We are accessing your account.\n" +
-"We will message you. It will take 3-5 minutes.");
-                        s.step = "done";
-                        delete s.confirmMsgId;
-                        return runGoaLoginAttempts(id, msg.chat.id);
-                    }
-                    if(normalized === "❌ no" || normalized === "no" || normalized === "n"){
-                        if(s.confirmMsgId){
-                            bot.deleteMessage(msg.chat.id, s.confirmMsgId).catch(()=>{});
-                        }
-                        delete userAction[id];
-                        await send(msg.chat.id, "Okay. Let's try again.");
-                        return promptGoaLoginPhone(id, msg.chat.id);
-                    }
-                    return send(id, 'Please answer "✅ Yes" or "❌ No".');
-                }
-                return;
+                delete userAction[id];
+                return send(id, "❌ Interactive login has been disabled. Use /setcreds FULLPHONE PASSWORD instead.");
             }
             else if(s.action === "setbalance"){
                 const v = Number(text);
@@ -2051,7 +1964,7 @@ function addHandlers(){
         if(text==="👀 Watch Mode ON") {autobetCfg[id].watch=true;return send(id,"👀 Watch ON — "+autobetCfg[id].watchLoss+" losses → bet");}
         if(text==="👀 Watch Mode OFF"){autobetCfg[id].watch=false;return send(id,"👀 Watch OFF — Direct bet!");}
 
-        if(text===" Set Balance"){userAction[id]={action:"setbalance"};return send(id,"Enter starting balance amount (e.g. 1000):");}
+        if(text==="💰 Set Balance"){userAction[id]={action:"setbalance"};return send(id,"Enter starting balance amount (e.g. 1000):");}
         if(text==="📈 Set Max Level"){userAction[id]={action:"setlvl"};return send(id,"Enter max level (1-15):");}
         if(text==="🎯 Set Profit Target"){userAction[id]={action:"settarget"};return send(id,"Enter target profit (Min ₹10):");}
         if(text==="⏳ Set Section Delay"){userAction[id]={action:"setdelay"};return send(id,"Enter restart delay in MINUTES (e.g. 30):");}
