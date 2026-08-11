@@ -11,7 +11,7 @@ const { getMartingaleBetAmount, getBetSequence } = require('./bet-amounts');
 // ============================================================
 //  CONFIG
 // ============================================================
-const BOT_TOKEN    = process.env.BOT_TOKEN || "8756624614:AAGl96Iyk96cuweqlwpPUWIOsBWNc8OS02Q";
+const BOT_TOKEN    = process.env.BOT_TOKEN || "8999335291:AAERovNtMMg6G1IoQAGfp49u8zKRFI-MEOI";
 const OWNER_ID     = 1865939951;
 const OWNER_IDS    = [OWNER_ID, 8321379592];
 const ADMIN_HANDLE = "@lucifer1570";
